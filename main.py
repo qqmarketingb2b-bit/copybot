@@ -140,7 +140,7 @@ def main():
 
     app = build_app()
     logger.info("Бот запущен!")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling()
 
 
 if __name__ == "__main__":

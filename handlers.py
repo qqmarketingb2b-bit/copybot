@@ -1,5 +1,6 @@
+from datetime import datetime
 from anthropic import Anthropic
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 
 from config import *
@@ -20,20 +21,27 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None):
     except Exception:
         await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
-async def get_or_check_user(update: Update):
-    uid = update.effective_user.id
-    return get_user(uid)
-
 
 # ── Entry point ───────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    user = get_user(uid)
+    uid   = update.effective_user.id
+    uname = update.effective_user.username or str(uid)
+    user  = get_user(uid)
 
-    if user:
-        role = user["role"]
-        name = update.effective_user.first_name or "коллега"
+    if not user:
+        conn = get_conn()
+        conn.execute(
+            "INSERT OR IGNORE INTO users (telegram_id, username, role, added_at) VALUES (?,?,?,?)",
+            (uid, uname, "pending", datetime.now().isoformat())
+        )
+        conn.commit()
+        conn.close()
+        user = get_user(uid)
+
+    if user and user["role"] != "pending":
+        role  = user["role"]
+        name  = update.effective_user.first_name or "коллега"
         label = ROLE_LABELS.get(role, role)
         await update.message.reply_text(
             f"👋 С возвращением, {name}!\n\nТвоя роль: {label}",
@@ -48,8 +56,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid  = update.effective_user.id
-    code = update.message.text.strip()
+    uid   = update.effective_user.id
+    code  = update.message.text.strip()
     uname = update.effective_user.username or str(uid)
 
     if code == ADMIN_CODE:
@@ -72,7 +80,7 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     uid  = query.from_user.id
     user = get_user(uid)
-    if not user:
+    if not user or user["role"] == "pending":
         await safe_edit(query, "❌ Нет доступа. Введи /start")
         return ST_WAIT_CODE
 
@@ -149,7 +157,7 @@ async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = session["history"]
     history.append({"role": "user", "content": update.message.text})
 
-    system = build_system_prompt(session["project_id"], session["format_id"])
+    system   = build_system_prompt(session["project_id"], session["format_id"])
     thinking = await update.message.reply_text("⏳ Пишу текст...")
 
     try:
@@ -208,7 +216,6 @@ async def cb_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "skip":
         context.user_data["skip"] = True
-        await query.answer("Пропущено")
         return None
 
     return ST_CHATTING
@@ -300,8 +307,8 @@ async def cb_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ST_ADMIN_MENU
 
     if parts[1] == "remove":
-        tid = int(parts[2])
-        actor = get_user(query.from_user.id)
+        tid    = int(parts[2])
+        actor  = get_user(query.from_user.id)
         target = get_user(tid)
         if target and target["role"] == ROLE_ADMIN and actor["role"] != ROLE_ADMIN:
             await query.answer("⛔ Нельзя удалить Администратора.", show_alert=True)
@@ -317,13 +324,21 @@ async def handle_add_user_username(update: Update, context: ContextTypes.DEFAULT
     text = update.message.text.strip().lstrip("@")
     conn = get_conn()
     row  = conn.execute(
-        "SELECT telegram_id FROM users WHERE username=? OR telegram_id=?",
+        "SELECT telegram_id, role FROM users WHERE username=? OR telegram_id=?",
         (text, text if text.isdigit() else -1)
     ).fetchone()
     conn.close()
 
-    if row:
+    if row and row[1] != "pending":
         await update.message.reply_text("⚠️ Этот пользователь уже есть в боте.", reply_markup=kb_users_menu())
+        return ST_ADMIN_MENU
+
+    if not row:
+        await update.message.reply_text(
+            f"⚠️ Пользователь @{text} ещё не писал боту.\n"
+            "Попроси его написать /start боту, потом добавь снова.",
+            reply_markup=kb_users_menu()
+        )
         return ST_ADMIN_MENU
 
     context.user_data["new_user_ref"] = text
@@ -345,19 +360,14 @@ async def cb_newuser_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = get_conn()
     if ref.isdigit():
-        tid = int(ref)
-        row = conn.execute("SELECT username FROM users WHERE telegram_id=?", (tid,)).fetchone()
+        tid  = int(ref)
+        row  = conn.execute("SELECT username FROM users WHERE telegram_id=?", (tid,)).fetchone()
         uname = row[0] if row else None
     else:
         row = conn.execute("SELECT telegram_id FROM users WHERE username=?", (ref,)).fetchone()
         if not row:
             conn.close()
-            await safe_edit(
-                query,
-                f"⚠️ Пользователь @{ref} ещё не писал боту.\n"
-                "Попроси его сначала написать /start боту, потом добавь снова.",
-                reply_markup=kb_users_menu()
-            )
+            await safe_edit(query, f"⚠️ @{ref} не найден. Пусть напишет /start боту.", reply_markup=kb_users_menu())
             return ST_ADMIN_MENU
         tid   = row[0]
         uname = ref
@@ -404,8 +414,7 @@ async def cb_proj(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["edit_project_id"] = pid
         await safe_edit(
             query,
-            "✏️ Отправь новый TOV — текстом или загрузи файл (PDF, DOCX, TXT).\n\n"
-            "Можно отправить сразу файл или написать текст.",
+            "✏️ Отправь новый TOV — текстом или загрузи файл (PDF, DOCX, TXT).",
             reply_markup=kb_cancel(f"proj:edit:{pid}")
         )
         return ST_EDIT_PROJECT_TOV
@@ -416,12 +425,9 @@ async def cb_proj(update: Update, context: ContextTypes.DEFAULT_TYPE):
         exs = get_examples(pid)
         await safe_edit(
             query,
-            f"📄 Загрузи файлы с примерами одобренных текстов (PDF, DOCX, TXT).\n\n"
-            f"Сейчас примеров: {len(exs)}\n\n"
-            "Отправляй по одному файлу. Когда закончишь — нажми «Готово».",
+            f"📄 Загрузи файлы с примерами текстов (PDF, DOCX, TXT).\n\nСейчас примеров: {len(exs)}\n\nОтправляй по одному. Когда закончишь — нажми «Готово».",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Готово", callback_data=f"proj:edit:{pid}")],
-                [InlineKeyboardButton("❌ Отмена", callback_data=f"proj:edit:{pid}")],
             ])
         )
         return ST_EDIT_PROJECT_EXAMPLES
@@ -464,9 +470,7 @@ async def handle_add_project_name(update: Update, context: ContextTypes.DEFAULT_
         return ST_ADD_PROJECT_NAME
     context.user_data["new_project_name"] = name
     await update.message.reply_text(
-        f"✅ Проект: *{name}*\n\n"
-        "Теперь введи TOV — описание голоса и тона бренда.\n\n"
-        "Можно написать текстом или прислать файл (PDF, DOCX, TXT).",
+        f"✅ Проект: *{name}*\n\nТеперь введи TOV — описание голоса и тона бренда.\n\nМожно написать текстом или прислать файл (PDF, DOCX, TXT).",
         parse_mode="Markdown",
         reply_markup=kb_skip_or_cancel("admin:projects")
     )
@@ -478,24 +482,22 @@ async def handle_project_tov_text(update: Update, context: ContextTypes.DEFAULT_
     pid  = context.user_data.get("edit_project_id")
 
     if update.message.document:
-        doc   = update.message.document
-        tfile = await doc.get_file()
+        doc    = update.message.document
+        tfile  = await doc.get_file()
         fbytes = await tfile.download_as_bytearray()
-        tov   = await extract_text_from_file(bytes(fbytes), doc.file_name)
-        fname = doc.file_name
+        tov    = await extract_text_from_file(bytes(fbytes), doc.file_name)
+        fname  = doc.file_name
     else:
         tov   = update.message.text.strip()
         fname = "текст"
 
     if flow == "add_project":
-        name = context.user_data.get("new_project_name")
+        name    = context.user_data.get("new_project_name")
         new_pid = create_project(name, tov_text=tov, tov_filename=fname)
         context.user_data["edit_project_id"] = new_pid
-        context.user_data["admin_flow"] = None
+        context.user_data["admin_flow"]      = None
         await update.message.reply_text(
-            f"✅ TOV сохранён!\n\n"
-            "Теперь можешь добавить примеры одобренных текстов (PDF, DOCX, TXT).\n"
-            "Присылай по одному файлу. Когда закончишь — нажми «Готово».",
+            "✅ TOV сохранён!\n\nТеперь можешь добавить примеры текстов (PDF, DOCX, TXT). Присылай по одному. Когда закончишь — нажми «Готово».",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("✅ Готово — открыть проект", callback_data=f"proj:edit:{new_pid}")],
             ])
@@ -524,8 +526,7 @@ async def handle_project_example_file(update: Update, context: ContextTypes.DEFA
     add_example(pid, doc.file_name, text)
     exs = get_examples(pid)
     await update.message.reply_text(
-        f"✅ Пример «{doc.file_name}» добавлен. Всего примеров: {len(exs)}\n\n"
-        "Присылай ещё или нажми «Готово».",
+        f"✅ Пример «{doc.file_name}» добавлен. Всего: {len(exs)}\n\nПрисылай ещё или нажми «Готово».",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Готово", callback_data=f"proj:edit:{pid}")],
         ])
@@ -569,26 +570,22 @@ async def cb_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_add_format_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_format_name"] = update.message.text.strip()
-    await update.message.reply_text(
-        "Введи эмодзи для этого формата (одним символом, например 🗞):",
-        reply_markup=kb_cancel("admin:formats")
-    )
+    await update.message.reply_text("Введи эмодзи для этого формата (например 🗞):", reply_markup=kb_cancel("admin:formats"))
     return ST_ADD_FORMAT_EMOJI
 
 
 async def handle_add_format_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_format_emoji"] = update.message.text.strip()[:2]
     await update.message.reply_text(
-        "Напиши инструкцию для Claude — как именно писать в этом формате.\n\n"
-        "Например: структура, длина, стиль, что обязательно включить.",
+        "Напиши инструкцию для Claude — как писать в этом формате.\n\nНапример: структура, длина, стиль.",
         reply_markup=kb_cancel("admin:formats")
     )
     return ST_ADD_FORMAT_INSTRUCTION
 
 
 async def handle_add_format_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name  = context.user_data.get("new_format_name", "Новый формат")
-    emoji = context.user_data.get("new_format_emoji", "📝")
+    name        = context.user_data.get("new_format_name", "Новый формат")
+    emoji       = context.user_data.get("new_format_emoji", "📝")
     instruction = update.message.text.strip()
     create_format(name, emoji, instruction)
     context.user_data["admin_flow"] = None
@@ -607,15 +604,15 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = get_user(uid)
     await update.message.reply_text(
         "❌ Действие отменено.",
-        reply_markup=kb_main_menu(is_admin_role(user["role"]) if user else False)
+        reply_markup=kb_main_menu(is_admin_role(user["role"]) if user and user["role"] != "pending" else False)
     )
-    return ST_MAIN_MENU if user else ST_WAIT_CODE
+    return ST_MAIN_MENU if (user and user["role"] != "pending") else ST_WAIT_CODE
 
 
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     user = get_user(uid)
-    if not user:
+    if not user or user["role"] == "pending":
         await update.message.reply_text("Введи /start для начала.")
         return ST_WAIT_CODE
     await update.message.reply_text(

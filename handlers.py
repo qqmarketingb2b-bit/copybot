@@ -342,13 +342,14 @@ async def handle_add_user_username(update: Update, context: ContextTypes.DEFAULT
         return ST_ADMIN_MENU
 
     context.user_data["new_user_ref"] = text
+    actor = get_user(update.effective_user.id)
+    buttons = [[InlineKeyboardButton("👤 Сотрудник", callback_data=f"newuser:role:{text}:employee")]]
+    if actor and actor["role"] == ROLE_ADMIN:
+        buttons.append([InlineKeyboardButton("⭐ Суб-Админ", callback_data=f"newuser:role:{text}:subadmin")])
+    buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="admin:users")])
     await update.message.reply_text(
         f"Выбери роль для @{text}:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("👤 Сотрудник",  callback_data=f"newuser:role:{text}:employee")],
-            [InlineKeyboardButton("⭐ Суб-Админ", callback_data=f"newuser:role:{text}:subadmin")],
-            [InlineKeyboardButton("❌ Отмена",     callback_data="admin:users")],
-        ])
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
     return ST_ADD_USER_WAIT_ROLE
 

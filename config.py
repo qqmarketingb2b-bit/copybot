@@ -1,0 +1,47 @@
+import os
+
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+ANTHROPIC_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
+ADMIN_CODE       = os.environ.get("ADMIN_CODE", "ADMIN_SECRET_2024")
+
+CLAUDE_MODEL     = "claude-opus-4-20250514"
+MAX_TOKENS       = 2000
+MAX_FILE_SIZE_MB = 10
+
+ROLE_ADMIN    = "admin"
+ROLE_SUBADMIN = "subadmin"
+ROLE_EMPLOYEE = "employee"
+
+ROLE_LABELS = {
+    ROLE_ADMIN:    "Администратор",
+    ROLE_SUBADMIN: "Суб-Админ",
+    ROLE_EMPLOYEE: "Сотрудник",
+}
+
+ADMIN_ROLES = {ROLE_ADMIN, ROLE_SUBADMIN}
+
+(
+    ST_WAIT_CODE,
+    ST_MAIN_MENU,
+    ST_WAIT_PROJECT,
+    ST_WAIT_FORMAT,
+    ST_WAIT_TZ,
+    ST_CHATTING,
+
+    ST_ADMIN_MENU,
+
+    ST_ADD_USER_WAIT_USERNAME,
+    ST_ADD_USER_WAIT_ROLE,
+
+    ST_ADD_PROJECT_NAME,
+    ST_ADD_PROJECT_TOV,
+    ST_ADD_PROJECT_EXAMPLES,
+
+    ST_EDIT_PROJECT_MENU,
+    ST_EDIT_PROJECT_TOV,
+    ST_EDIT_PROJECT_EXAMPLES,
+
+    ST_ADD_FORMAT_NAME,
+    ST_ADD_FORMAT_EMOJI,
+    ST_ADD_FORMAT_INSTRUCTION,
+) = range(18)

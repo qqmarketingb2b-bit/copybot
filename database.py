@@ -12,7 +12,6 @@ def get_conn():
 def init_db():
     conn = get_conn()
     c = conn.cursor()
-
     c.executescript("""
         CREATE TABLE IF NOT EXISTS users (
             telegram_id   INTEGER PRIMARY KEY,
@@ -30,21 +29,31 @@ def init_db():
             created_at    TEXT
         );
 
-        CREATE TABLE IF NOT EXISTS project_examples (
-            id            INTEGER PRIMARY KEY AUTOINCREMENT,
-            project_id    INTEGER NOT NULL,
-            filename      TEXT,
-            content       TEXT,
-            added_at      TEXT,
-            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
-        );
-
         CREATE TABLE IF NOT EXISTS formats (
             id            INTEGER PRIMARY KEY AUTOINCREMENT,
             name          TEXT NOT NULL,
             emoji         TEXT DEFAULT '📝',
             instruction   TEXT NOT NULL,
             active        INTEGER DEFAULT 1
+        );
+
+        CREATE TABLE IF NOT EXISTS project_formats (
+            project_id    INTEGER NOT NULL,
+            format_id     INTEGER NOT NULL,
+            PRIMARY KEY (project_id, format_id),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (format_id)  REFERENCES formats(id)  ON DELETE CASCADE
+        );
+
+        CREATE TABLE IF NOT EXISTS project_examples (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id    INTEGER NOT NULL,
+            format_id     INTEGER NOT NULL,
+            filename      TEXT,
+            content       TEXT,
+            added_at      TEXT,
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+            FOREIGN KEY (format_id)  REFERENCES formats(id)  ON DELETE CASCADE
         );
 
         CREATE TABLE IF NOT EXISTS sessions (
@@ -61,18 +70,14 @@ def init_db():
         );
     """)
 
-    c.execute("SELECT COUNT(*) FROM formats").fetchone()
     if c.execute("SELECT COUNT(*) FROM formats").fetchone()[0] == 0:
         default_formats = [
             ("Пост в Telegram", "📢", "Пишешь пост для Telegram. Длина — до 1500 символов. Абзацы, можно эмодзи. Никаких заголовков с #. Живой язык."),
             ("Пост в Instagram", "📸", "Пишешь пост для Instagram. До 2200 символов. Живой язык, эмодзи уместны. Хэштеги (5–10 штук) в самом конце через пустую строку."),
-            ("Статья", "📄", "Пишешь статью. Структура: заголовок H1, подзаголовки H2, развёрнутые абзацы. Длина — от 1000 слов. Экспертный тон."),
+            ("Статья", "📄", "Пишешь статью. Структура: заголовок H1, подзаголовки H2, развёрнутые абзацы. Пиши столько, сколько указано в ТЗ."),
             ("Email-рассылка", "📧", "Пишешь письмо для email-рассылки. Тема письма в первой строке после слова ТЕМА:. Длина — 150–300 слов. Чёткий призыв к действию в конце."),
         ]
-        c.executemany(
-            "INSERT INTO formats (name, emoji, instruction) VALUES (?,?,?)",
-            default_formats
-        )
+        c.executemany("INSERT INTO formats (name, emoji, instruction) VALUES (?,?,?)", default_formats)
 
     conn.commit()
     conn.close()
@@ -80,13 +85,13 @@ def init_db():
 
 # ── Users ──────────────────────────────────────────────────────────────
 
-def get_user(telegram_id: int):
+def get_user(telegram_id):
     conn = get_conn()
     row = conn.execute("SELECT * FROM users WHERE telegram_id=?", (telegram_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
-def add_user(telegram_id: int, username: str, role: str = "employee", added_by: int = None):
+def add_user(telegram_id, username, role="employee", added_by=None):
     conn = get_conn()
     conn.execute(
         "INSERT OR REPLACE INTO users (telegram_id, username, role, added_by, added_at) VALUES (?,?,?,?,?)",
@@ -95,13 +100,13 @@ def add_user(telegram_id: int, username: str, role: str = "employee", added_by: 
     conn.commit()
     conn.close()
 
-def update_user_role(telegram_id: int, role: str):
+def update_user_role(telegram_id, role):
     conn = get_conn()
     conn.execute("UPDATE users SET role=? WHERE telegram_id=?", (role, telegram_id))
     conn.commit()
     conn.close()
 
-def remove_user(telegram_id: int):
+def remove_user(telegram_id):
     conn = get_conn()
     conn.execute("DELETE FROM users WHERE telegram_id=?", (telegram_id,))
     conn.commit()
@@ -116,7 +121,7 @@ def list_users():
 
 # ── Projects ───────────────────────────────────────────────────────────
 
-def create_project(name: str, tov_text: str = "", tov_filename: str = ""):
+def create_project(name, tov_text="", tov_filename=""):
     conn = get_conn()
     try:
         conn.execute(
@@ -124,39 +129,36 @@ def create_project(name: str, tov_text: str = "", tov_filename: str = ""):
             (name, tov_text, tov_filename, datetime.now().isoformat())
         )
         conn.commit()
-        project_id = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()[0]
+        pid = conn.execute("SELECT id FROM projects WHERE name=?", (name,)).fetchone()[0]
         conn.close()
-        return project_id
+        return pid
     except sqlite3.IntegrityError:
         conn.close()
         return None
 
-def get_project(project_id: int):
+def get_project(project_id):
     conn = get_conn()
     row = conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
-def get_project_by_name(name: str):
+def get_project_by_name(name):
     conn = get_conn()
     row = conn.execute("SELECT * FROM projects WHERE name=?", (name,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
-def update_project(project_id: int, name: str = None, tov_text: str = None, tov_filename: str = None):
+def update_project(project_id, name=None, tov_text=None, tov_filename=None):
     conn = get_conn()
     proj = dict(conn.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone())
     name = name if name is not None else proj["name"]
     tov_text = tov_text if tov_text is not None else proj["tov_text"]
     tov_filename = tov_filename if tov_filename is not None else proj["tov_filename"]
-    conn.execute(
-        "UPDATE projects SET name=?, tov_text=?, tov_filename=? WHERE id=?",
-        (name, tov_text, tov_filename, project_id)
-    )
+    conn.execute("UPDATE projects SET name=?, tov_text=?, tov_filename=? WHERE id=?", (name, tov_text, tov_filename, project_id))
     conn.commit()
     conn.close()
 
-def delete_project(project_id: int):
+def delete_project(project_id):
     conn = get_conn()
     conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
     conn.commit()
@@ -168,25 +170,59 @@ def list_projects():
     conn.close()
     return [dict(r) for r in rows]
 
-def add_example(project_id: int, filename: str, content: str):
+
+# ── Project ↔ Format links ─────────────────────────────────────────────
+
+def link_project_format(project_id, format_id):
+    conn = get_conn()
+    conn.execute("INSERT OR IGNORE INTO project_formats (project_id, format_id) VALUES (?,?)", (project_id, format_id))
+    conn.commit()
+    conn.close()
+
+def unlink_project_format(project_id, format_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM project_formats WHERE project_id=? AND format_id=?", (project_id, format_id))
+    conn.commit()
+    conn.close()
+
+def get_project_formats(project_id):
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT f.* FROM formats f
+        JOIN project_formats pf ON f.id = pf.format_id
+        WHERE pf.project_id=? ORDER BY f.id
+    """, (project_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def is_format_linked(project_id, format_id):
+    conn = get_conn()
+    row = conn.execute("SELECT 1 FROM project_formats WHERE project_id=? AND format_id=?", (project_id, format_id)).fetchone()
+    conn.close()
+    return row is not None
+
+
+# ── Examples (project + format) ────────────────────────────────────────
+
+def add_example(project_id, format_id, filename, content):
     conn = get_conn()
     conn.execute(
-        "INSERT INTO project_examples (project_id, filename, content, added_at) VALUES (?,?,?,?)",
-        (project_id, filename, content, datetime.now().isoformat())
+        "INSERT INTO project_examples (project_id, format_id, filename, content, added_at) VALUES (?,?,?,?,?)",
+        (project_id, format_id, filename, content, datetime.now().isoformat())
     )
     conn.commit()
     conn.close()
 
-def get_examples(project_id: int):
+def get_examples(project_id, format_id):
     conn = get_conn()
     rows = conn.execute(
-        "SELECT * FROM project_examples WHERE project_id=? ORDER BY added_at",
-        (project_id,)
+        "SELECT * FROM project_examples WHERE project_id=? AND format_id=? ORDER BY added_at",
+        (project_id, format_id)
     ).fetchall()
     conn.close()
     return [dict(r) for r in rows]
 
-def delete_example(example_id: int):
+def delete_example(example_id):
     conn = get_conn()
     conn.execute("DELETE FROM project_examples WHERE id=?", (example_id,))
     conn.commit()
@@ -202,22 +238,19 @@ def list_formats(active_only=True):
     conn.close()
     return [dict(r) for r in rows]
 
-def get_format(format_id: int):
+def get_format(format_id):
     conn = get_conn()
     row = conn.execute("SELECT * FROM formats WHERE id=?", (format_id,)).fetchone()
     conn.close()
     return dict(row) if row else None
 
-def create_format(name: str, emoji: str, instruction: str):
+def create_format(name, emoji, instruction):
     conn = get_conn()
-    conn.execute(
-        "INSERT INTO formats (name, emoji, instruction) VALUES (?,?,?)",
-        (name, emoji, instruction)
-    )
+    conn.execute("INSERT INTO formats (name, emoji, instruction) VALUES (?,?,?)", (name, emoji, instruction))
     conn.commit()
     conn.close()
 
-def delete_format(format_id: int):
+def delete_format(format_id):
     conn = get_conn()
     conn.execute("DELETE FROM formats WHERE id=?", (format_id,))
     conn.commit()
@@ -226,7 +259,7 @@ def delete_format(format_id: int):
 
 # ── Sessions ───────────────────────────────────────────────────────────
 
-def get_session(telegram_id: int):
+def get_session(telegram_id):
     conn = get_conn()
     row = conn.execute("SELECT * FROM sessions WHERE telegram_id=?", (telegram_id,)).fetchone()
     conn.close()
@@ -236,7 +269,7 @@ def get_session(telegram_id: int):
     d["history"] = json.loads(d["history"])
     return d
 
-def save_session(telegram_id: int, project_id=None, format_id=None, history=None):
+def save_session(telegram_id, project_id=None, format_id=None, history=None):
     conn = get_conn()
     existing = conn.execute("SELECT telegram_id FROM sessions WHERE telegram_id=?", (telegram_id,)).fetchone()
     if existing:
@@ -255,19 +288,19 @@ def save_session(telegram_id: int, project_id=None, format_id=None, history=None
     conn.commit()
     conn.close()
 
-def clear_session_history(telegram_id: int):
+def clear_session_history(telegram_id):
     save_session(telegram_id, history=[])
 
 
 # ── Settings ───────────────────────────────────────────────────────────
 
-def get_setting(key: str, default=None):
+def get_setting(key, default=None):
     conn = get_conn()
     row = conn.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     conn.close()
     return row[0] if row else default
 
-def set_setting(key: str, value: str):
+def set_setting(key, value):
     conn = get_conn()
     conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?,?)", (key, value))
     conn.commit()

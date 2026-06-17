@@ -49,9 +49,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_MAIN_MENU
 
-    await update.message.reply_text(
-        "👋 Привет! Это бот для копирайтеров.\n\nВведи код доступа:"
-    )
+    await update.message.reply_text("👋 Привет! Это бот для копирайтеров.\n\nВведи код доступа:")
     return ST_WAIT_CODE
 
 
@@ -88,17 +86,13 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "main":
         role = user["role"]
-        await safe_edit(
-            query,
-            f"🏠 Главное меню\n\nРоль: {ROLE_LABELS.get(role, role)}",
-            reply_markup=kb_main_menu(is_admin_role(role))
-        )
+        await safe_edit(query, f"🏠 Главное меню\n\nРоль: {ROLE_LABELS.get(role, role)}", reply_markup=kb_main_menu(is_admin_role(role)))
         return ST_MAIN_MENU
 
     if action == "write":
         projects = list_projects()
         if not projects:
-            await safe_edit(query, "⚠️ Пока нет ни одного проекта. Обратись к администратору.", reply_markup=kb_main_menu(is_admin_role(user["role"])))
+            await safe_edit(query, "⚠️ Пока нет ни одного проекта.", reply_markup=kb_main_menu(is_admin_role(user["role"])))
             return ST_MAIN_MENU
         await safe_edit(query, "📁 Выбери проект:", reply_markup=kb_projects())
         return ST_WAIT_PROJECT
@@ -116,26 +110,32 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ── Writing flow ──────────────────────────────────────────────────────
 
 async def cb_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query      = update.callback_query
     await query.answer()
     project_id = int(query.data.split(":")[1])
-    proj = get_project(project_id)
+    proj       = get_project(project_id)
+    formats    = get_project_formats(project_id)
+
+    if not formats:
+        await safe_edit(query, f"⚠️ У проекта «{proj['name']}» нет форматов. Обратись к администратору.", reply_markup=kb_projects())
+        return ST_WAIT_PROJECT
+
     save_session(query.from_user.id, project_id=project_id)
     clear_session_history(query.from_user.id)
     await safe_edit(
         query,
         f"✅ Проект: *{proj['name']}*\n\nВыбери формат текста:",
         parse_mode="Markdown",
-        reply_markup=kb_formats()
+        reply_markup=kb_formats(project_id)
     )
     return ST_WAIT_FORMAT
 
 
 async def cb_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query     = update.callback_query
     await query.answer()
     format_id = int(query.data.split(":")[1])
-    fmt = get_format(format_id)
+    fmt       = get_format(format_id)
     save_session(query.from_user.id, format_id=format_id)
     clear_session_history(query.from_user.id)
     await safe_edit(
@@ -156,15 +156,11 @@ async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     history = session["history"]
     history.append({"role": "user", "content": update.message.text})
-
     system   = build_system_prompt(session["project_id"], session["format_id"])
     thinking = await update.message.reply_text("⏳ Пишу текст...")
 
     try:
-        resp = anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=MAX_TOKENS,
-            system=system, messages=history
-        )
+        resp  = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history)
         reply = resp.content[0].text
     except Exception as e:
         await thinking.edit_text(f"❌ Ошибка API: {e}")
@@ -180,18 +176,13 @@ async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = update.effective_user.id
     session = get_session(uid)
-
     history = session["history"]
     history.append({"role": "user", "content": update.message.text})
-
     system   = build_system_prompt(session["project_id"], session["format_id"])
     thinking = await update.message.reply_text("✏️ Вношу правки...")
 
     try:
-        resp = anthropic_client.messages.create(
-            model=CLAUDE_MODEL, max_tokens=MAX_TOKENS,
-            system=system, messages=history
-        )
+        resp  = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history)
         reply = resp.content[0].text
     except Exception as e:
         await thinking.edit_text(f"❌ Ошибка API: {e}")
@@ -205,7 +196,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cb_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query  = update.callback_query
     await query.answer()
     action = query.data.split(":", 1)[1]
 
@@ -215,8 +206,19 @@ async def cb_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ST_WAIT_TZ
 
     if action == "skip":
-        context.user_data["skip"] = True
-        return None
+        context.user_data["skipped"] = True
+        flow = context.user_data.get("admin_flow")
+        if flow == "add_project":
+            name    = context.user_data.get("new_project_name")
+            new_pid = create_project(name, tov_text="", tov_filename="")
+            context.user_data["edit_project_id"] = new_pid
+            context.user_data["admin_flow"]      = None
+            await query.message.reply_text(
+                f"✅ Проект «{name}» создан без TOV.\n\nВыбери форматы для этого проекта (можно несколько):",
+                reply_markup=kb_project_formats(new_pid)
+            )
+            return ST_EDIT_PROJECT_FORMAT_MENU
+        return ST_ADMIN_MENU
 
     return ST_CHATTING
 
@@ -239,30 +241,26 @@ def require_admin(func):
 
 @require_admin
 async def cb_admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
+    query   = update.callback_query
     await query.answer()
     section = query.data.split(":", 1)[1]
 
     if section == "back":
         await safe_edit(query, "⚙️ Панель администратора:", reply_markup=kb_admin_menu())
         return ST_ADMIN_MENU
-
     if section == "users":
         await safe_edit(query, "👥 Пользователи бота:", reply_markup=kb_users_menu())
         return ST_ADMIN_MENU
-
     if section == "projects":
         await safe_edit(query, "📁 Проекты:", reply_markup=kb_projects_menu())
         return ST_ADMIN_MENU
-
     if section == "formats":
         await safe_edit(query, "📝 Форматы текстов:", reply_markup=kb_formats_menu())
         return ST_ADMIN_MENU
-
     return ST_ADMIN_MENU
 
 
-# ── Users management ──────────────────────────────────────────────────
+# ── Users ─────────────────────────────────────────────────────────────
 
 @require_admin
 async def cb_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -271,29 +269,17 @@ async def cb_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = query.data.split(":")
 
     if parts[1] == "add":
-        context.user_data["admin_flow"] = "add_user"
-        await safe_edit(
-            query,
-            "👤 Введи Telegram @username сотрудника (без @):\n\n"
-            "⚠️ Сотрудник должен сначала написать боту /start, чтобы мы знали его ID.\n"
-            "Либо введи числовой Telegram ID напрямую.",
-            reply_markup=kb_cancel("admin:users")
-        )
+        await safe_edit(query, "👤 Введи Telegram @username сотрудника (без @):\n\n⚠️ Сотрудник должен сначала написать боту /start.", reply_markup=kb_cancel("admin:users"))
         return ST_ADD_USER_WAIT_USERNAME
 
     if parts[1] == "manage":
-        tid  = int(parts[2])
-        usr  = get_user(tid)
+        tid = int(parts[2])
+        usr = get_user(tid)
         if not usr:
             await safe_edit(query, "❌ Пользователь не найден.", reply_markup=kb_users_menu())
             return ST_ADMIN_MENU
         uname = f"@{usr['username']}" if usr["username"] else str(tid)
-        label = ROLE_LABELS.get(usr["role"], usr["role"])
-        await safe_edit(
-            query,
-            f"👤 {uname}\nРоль: {label}",
-            reply_markup=kb_user_manage(tid, usr["role"])
-        )
+        await safe_edit(query, f"👤 {uname}\nРоль: {ROLE_LABELS.get(usr['role'], usr['role'])}", reply_markup=kb_user_manage(tid, usr["role"]))
         return ST_ADMIN_MENU
 
     if parts[1] == "setrole":
@@ -323,10 +309,7 @@ async def cb_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_add_user_username(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lstrip("@")
     conn = get_conn()
-    row  = conn.execute(
-        "SELECT telegram_id, role FROM users WHERE username=? OR telegram_id=?",
-        (text, text if text.isdigit() else -1)
-    ).fetchone()
+    row  = conn.execute("SELECT telegram_id, role FROM users WHERE username=? OR telegram_id=?", (text, text if text.isdigit() else -1)).fetchone()
     conn.close()
 
     if row and row[1] != "pending":
@@ -334,23 +317,15 @@ async def handle_add_user_username(update: Update, context: ContextTypes.DEFAULT
         return ST_ADMIN_MENU
 
     if not row:
-        await update.message.reply_text(
-            f"⚠️ Пользователь @{text} ещё не писал боту.\n"
-            "Попроси его написать /start боту, потом добавь снова.",
-            reply_markup=kb_users_menu()
-        )
+        await update.message.reply_text(f"⚠️ @{text} ещё не писал боту. Попроси написать /start.", reply_markup=kb_users_menu())
         return ST_ADMIN_MENU
 
-    context.user_data["new_user_ref"] = text
-    actor = get_user(update.effective_user.id)
+    actor   = get_user(update.effective_user.id)
     buttons = [[InlineKeyboardButton("👤 Сотрудник", callback_data=f"newuser:role:{text}:employee")]]
     if actor and actor["role"] == ROLE_ADMIN:
         buttons.append([InlineKeyboardButton("⭐ Суб-Админ", callback_data=f"newuser:role:{text}:subadmin")])
     buttons.append([InlineKeyboardButton("❌ Отмена", callback_data="admin:users")])
-    await update.message.reply_text(
-        f"Выбери роль для @{text}:",
-        reply_markup=InlineKeyboardMarkup(buttons)
-    )
+    await update.message.reply_text(f"Выбери роль для @{text}:", reply_markup=InlineKeyboardMarkup(buttons))
     return ST_ADD_USER_WAIT_ROLE
 
 
@@ -361,29 +336,25 @@ async def cb_newuser_role(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = get_conn()
     if ref.isdigit():
-        tid  = int(ref)
-        row  = conn.execute("SELECT username FROM users WHERE telegram_id=?", (tid,)).fetchone()
+        tid   = int(ref)
+        row   = conn.execute("SELECT username FROM users WHERE telegram_id=?", (tid,)).fetchone()
         uname = row[0] if row else None
     else:
         row = conn.execute("SELECT telegram_id FROM users WHERE username=?", (ref,)).fetchone()
         if not row:
             conn.close()
-            await safe_edit(query, f"⚠️ @{ref} не найден. Пусть напишет /start боту.", reply_markup=kb_users_menu())
+            await safe_edit(query, f"⚠️ @{ref} не найден.", reply_markup=kb_users_menu())
             return ST_ADMIN_MENU
         tid   = row[0]
         uname = ref
     conn.close()
 
     add_user(tid, uname or ref, role=role, added_by=query.from_user.id)
-    await safe_edit(
-        query,
-        f"✅ @{uname or ref} добавлен как {ROLE_LABELS[role]}.",
-        reply_markup=kb_users_menu()
-    )
+    await safe_edit(query, f"✅ @{uname or ref} добавлен как {ROLE_LABELS[role]}.", reply_markup=kb_users_menu())
     return ST_ADMIN_MENU
 
 
-# ── Projects management ───────────────────────────────────────────────
+# ── Projects ──────────────────────────────────────────────────────────
 
 @require_admin
 async def cb_proj(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -399,60 +370,68 @@ async def cb_proj(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if parts[1] == "edit":
         pid  = int(parts[2])
         proj = get_project(pid)
-        exs  = get_examples(pid)
+        fmts = get_project_formats(pid)
         tov_info = "✅ Загружен" if proj["tov_text"] else "❌ Не задан"
-        await safe_edit(
-            query,
-            f"📁 *{proj['name']}*\n\nTOV: {tov_info}\nПримеров текстов: {len(exs)}",
-            parse_mode="Markdown",
-            reply_markup=kb_project_edit(pid)
-        )
+        await safe_edit(query, f"📁 *{proj['name']}*\n\nTOV: {tov_info}\nФорматов: {len(fmts)}", parse_mode="Markdown", reply_markup=kb_project_edit(pid))
         context.user_data["edit_project_id"] = pid
         return ST_EDIT_PROJECT_MENU
 
     if parts[1] == "edittov":
         pid = int(parts[2])
         context.user_data["edit_project_id"] = pid
-        await safe_edit(
-            query,
-            "✏️ Отправь новый TOV — текстом или загрузи файл (PDF, DOCX, TXT).",
-            reply_markup=kb_cancel(f"proj:edit:{pid}")
-        )
+        await safe_edit(query, "✏️ Отправь новый TOV — текстом или файлом (PDF, DOCX, TXT).", reply_markup=kb_cancel(f"proj:edit:{pid}"))
         return ST_EDIT_PROJECT_TOV
 
-    if parts[1] == "addex":
+    if parts[1] == "formats":
         pid = int(parts[2])
         context.user_data["edit_project_id"] = pid
-        exs = get_examples(pid)
-        await safe_edit(
-            query,
-            f"📄 Загрузи файлы с примерами текстов (PDF, DOCX, TXT).\n\nСейчас примеров: {len(exs)}\n\nОтправляй по одному. Когда закончишь — нажми «Готово».",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Готово", callback_data=f"proj:edit:{pid}")],
-            ])
-        )
+        await safe_edit(query, "📝 Форматы проекта (✅ — подключён).\n\nНажми чтобы включить/выключить:", reply_markup=kb_project_formats(pid))
+        return ST_EDIT_PROJECT_FORMAT_MENU
+
+    if parts[1] == "togglefmt":
+        pid, fid = int(parts[2]), int(parts[3])
+        if is_format_linked(pid, fid):
+            unlink_project_format(pid, fid)
+        else:
+            link_project_format(pid, fid)
+        await safe_edit(query, "📝 Форматы проекта (✅ — подключён):\n\nНажми чтобы включить/выключить:", reply_markup=kb_project_formats(pid))
+        return ST_EDIT_PROJECT_FORMAT_MENU
+
+    if parts[1] == "exmenu":
+        pid = int(parts[2])
+        fmts = get_project_formats(pid)
+        if not fmts:
+            await query.answer("Сначала подключи хотя бы один формат", show_alert=True)
+            return ST_EDIT_PROJECT_FORMAT_MENU
+        await safe_edit(query, "📄 Выбери формат чтобы управлять примерами:", reply_markup=kb_project_format_examples(pid))
+        return ST_EDIT_PROJECT_FORMAT_MENU
+
+    if parts[1] == "exfmt":
+        pid, fid = int(parts[2]), int(parts[3])
+        fmt  = get_format(fid)
+        exs  = get_examples(pid, fid)
+        context.user_data["edit_project_id"] = pid
+        context.user_data["edit_format_id"]  = fid
+        await safe_edit(query, f"📄 Примеры для «{fmt['name']}» (всего: {len(exs)}):", reply_markup=kb_format_examples(pid, fid))
+        return ST_EDIT_PROJECT_FORMAT_MENU
+
+    if parts[1] == "addex":
+        pid, fid = int(parts[2]), int(parts[3])
+        fmt = get_format(fid)
+        context.user_data["edit_project_id"] = pid
+        context.user_data["edit_format_id"]  = fid
+        await safe_edit(query, f"📎 Загрузи файлы с примерами для формата «{fmt['name']}» (PDF, DOCX, TXT).\n\nКогда закончишь — нажми «Готово».",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Готово", callback_data=f"proj:exfmt:{pid}:{fid}")]]))
         return ST_EDIT_PROJECT_EXAMPLES
 
-    if parts[1] == "listex":
-        pid = int(parts[2])
-        exs = get_examples(pid)
-        if not exs:
-            await query.answer("Примеров нет", show_alert=True)
-            return ST_EDIT_PROJECT_MENU
-        btns = [[InlineKeyboardButton(f"🗑 {e['filename']}", callback_data=f"proj:delex:{e['id']}:{pid}")] for e in exs]
-        btns.append([InlineKeyboardButton("◀️ Назад", callback_data=f"proj:edit:{pid}")])
-        await safe_edit(query, "📋 Примеры (нажми чтобы удалить):", reply_markup=InlineKeyboardMarkup(btns))
-        return ST_EDIT_PROJECT_MENU
-
     if parts[1] == "delex":
-        ex_id, pid = int(parts[2]), int(parts[3])
+        ex_id, pid, fid = int(parts[2]), int(parts[3]), int(parts[4])
         delete_example(ex_id)
         await query.answer("Пример удалён")
-        exs  = get_examples(pid)
-        btns = [[InlineKeyboardButton(f"🗑 {e['filename']}", callback_data=f"proj:delex:{e['id']}:{pid}")] for e in exs]
-        btns.append([InlineKeyboardButton("◀️ Назад", callback_data=f"proj:edit:{pid}")])
-        await safe_edit(query, f"📋 Примеры (осталось {len(exs)}):", reply_markup=InlineKeyboardMarkup(btns))
-        return ST_EDIT_PROJECT_MENU
+        fmt = get_format(fid)
+        exs = get_examples(pid, fid)
+        await safe_edit(query, f"📄 Примеры для «{fmt['name']}» (всего: {len(exs)}):", reply_markup=kb_format_examples(pid, fid))
+        return ST_EDIT_PROJECT_FORMAT_MENU
 
     if parts[1] == "delete":
         pid  = int(parts[2])
@@ -467,11 +446,11 @@ async def cb_proj(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_add_project_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     if get_project_by_name(name):
-        await update.message.reply_text("⚠️ Проект с таким названием уже существует. Введи другое:")
+        await update.message.reply_text("⚠️ Проект с таким названием уже существует:")
         return ST_ADD_PROJECT_NAME
     context.user_data["new_project_name"] = name
     await update.message.reply_text(
-        f"✅ Проект: *{name}*\n\nТеперь введи TOV — описание голоса и тона бренда.\n\nМожно написать текстом или прислать файл (PDF, DOCX, TXT).",
+        f"✅ Проект: *{name}*\n\nВведи TOV — описание голоса и тона бренда.\n\nМожно текстом или файлом (PDF, DOCX, TXT).",
         parse_mode="Markdown",
         reply_markup=kb_skip_or_cancel("admin:projects")
     )
@@ -498,24 +477,21 @@ async def handle_project_tov_text(update: Update, context: ContextTypes.DEFAULT_
         context.user_data["edit_project_id"] = new_pid
         context.user_data["admin_flow"]      = None
         await update.message.reply_text(
-            "✅ TOV сохранён!\n\nТеперь можешь добавить примеры текстов (PDF, DOCX, TXT). Присылай по одному. Когда закончишь — нажми «Готово».",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Готово — открыть проект", callback_data=f"proj:edit:{new_pid}")],
-            ])
+            "✅ TOV сохранён!\n\nТеперь выбери форматы для этого проекта (✅ — подключён):",
+            reply_markup=kb_project_formats(new_pid)
         )
-        return ST_EDIT_PROJECT_EXAMPLES
+        return ST_EDIT_PROJECT_FORMAT_MENU
     else:
         update_project(pid, tov_text=tov, tov_filename=fname)
         proj = get_project(pid)
-        await update.message.reply_text(
-            f"✅ TOV проекта «{proj['name']}» обновлён.",
-            reply_markup=kb_project_edit(pid)
-        )
+        await update.message.reply_text(f"✅ TOV проекта «{proj['name']}» обновлён.", reply_markup=kb_project_edit(pid))
         return ST_EDIT_PROJECT_MENU
 
 
 async def handle_project_example_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pid = context.user_data.get("edit_project_id")
+    fid = context.user_data.get("edit_format_id")
+
     if not update.message.document:
         await update.message.reply_text("Отправь файл (PDF, DOCX, TXT) или нажми «Готово».")
         return ST_EDIT_PROJECT_EXAMPLES
@@ -524,18 +500,16 @@ async def handle_project_example_file(update: Update, context: ContextTypes.DEFA
     tfile  = await doc.get_file()
     fbytes = await tfile.download_as_bytearray()
     text   = await extract_text_from_file(bytes(fbytes), doc.file_name)
-    add_example(pid, doc.file_name, text)
-    exs = get_examples(pid)
+    add_example(pid, fid, doc.file_name, text)
+    exs = get_examples(pid, fid)
+    fmt = get_format(fid)
     await update.message.reply_text(
-        f"✅ Пример «{doc.file_name}» добавлен. Всего: {len(exs)}\n\nПрисылай ещё или нажми «Готово».",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Готово", callback_data=f"proj:edit:{pid}")],
-        ])
-    )
+        f"✅ Пример «{doc.file_name}» добавлен в «{fmt['name']}». Всего: {len(exs)}\n\nПрисылай ещё или нажми «Готово».",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✅ Готово", callback_data=f"proj:exfmt:{pid}:{fid}")]]))
     return ST_EDIT_PROJECT_EXAMPLES
 
 
-# ── Formats management ────────────────────────────────────────────────
+# ── Formats ───────────────────────────────────────────────────────────
 
 @require_admin
 async def cb_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -545,18 +519,13 @@ async def cb_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if parts[1] == "add":
         context.user_data["admin_flow"] = "add_format"
-        await safe_edit(query, "📝 Введи название нового формата (например: Пресс-релиз):", reply_markup=kb_cancel("admin:formats"))
+        await safe_edit(query, "📝 Введи название нового формата:", reply_markup=kb_cancel("admin:formats"))
         return ST_ADD_FORMAT_NAME
 
     if parts[1] == "manage":
         fid = int(parts[2])
         fmt = get_format(fid)
-        await safe_edit(
-            query,
-            f"{fmt['emoji']} *{fmt['name']}*\n\n{fmt['instruction']}",
-            parse_mode="Markdown",
-            reply_markup=kb_format_manage(fid)
-        )
+        await safe_edit(query, f"{fmt['emoji']} *{fmt['name']}*\n\n{fmt['instruction']}", parse_mode="Markdown", reply_markup=kb_format_manage(fid))
         return ST_ADMIN_MENU
 
     if parts[1] == "delete":
@@ -571,18 +540,13 @@ async def cb_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_add_format_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_format_name"] = update.message.text.strip()
-    await update.message.reply_text("Введи эмодзи для этого формата (например 🗞):", reply_markup=kb_cancel("admin:formats"))
+    await update.message.reply_text("Введи эмодзи для формата (например 🗞):", reply_markup=kb_cancel("admin:formats"))
     return ST_ADD_FORMAT_EMOJI
-
 
 async def handle_add_format_emoji(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_format_emoji"] = update.message.text.strip()[:2]
-    await update.message.reply_text(
-        "Напиши инструкцию для Claude — как писать в этом формате.\n\nНапример: структура, длина, стиль.",
-        reply_markup=kb_cancel("admin:formats")
-    )
+    await update.message.reply_text("Напиши инструкцию для Claude — структура, длина, стиль:", reply_markup=kb_cancel("admin:formats"))
     return ST_ADD_FORMAT_INSTRUCTION
-
 
 async def handle_add_format_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name        = context.user_data.get("new_format_name", "Новый формат")
@@ -590,10 +554,7 @@ async def handle_add_format_instruction(update: Update, context: ContextTypes.DE
     instruction = update.message.text.strip()
     create_format(name, emoji, instruction)
     context.user_data["admin_flow"] = None
-    await update.message.reply_text(
-        f"✅ Формат «{emoji} {name}» добавлен!",
-        reply_markup=kb_formats_menu()
-    )
+    await update.message.reply_text(f"✅ Формат «{emoji} {name}» добавлен!", reply_markup=kb_formats_menu())
     return ST_ADMIN_MENU
 
 
@@ -609,15 +570,11 @@ async def cmd_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ST_MAIN_MENU if (user and user["role"] != "pending") else ST_WAIT_CODE
 
-
 async def unknown_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     user = get_user(uid)
     if not user or user["role"] == "pending":
         await update.message.reply_text("Введи /start для начала.")
         return ST_WAIT_CODE
-    await update.message.reply_text(
-        "Не понимаю. Выбери действие:",
-        reply_markup=kb_main_menu(is_admin_role(user["role"]))
-    )
+    await update.message.reply_text("Не понимаю. Выбери действие:", reply_markup=kb_main_menu(is_admin_role(user["role"])))
     return ST_MAIN_MENU

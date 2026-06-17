@@ -160,8 +160,10 @@ async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thinking = await update.message.reply_text("⏳ Пишу текст...")
 
     try:
-        resp  = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history)
-        reply = resp.content[0].text
+        reply = ""
+        with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history) as stream:
+            for text in stream.text_stream:
+                reply += text
     except Exception as e:
         await thinking.edit_text(f"❌ Ошибка API: {e}")
         return ST_WAIT_TZ
@@ -182,8 +184,10 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     thinking = await update.message.reply_text("✏️ Вношу правки...")
 
     try:
-        resp  = anthropic_client.messages.create(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history)
-        reply = resp.content[0].text
+        reply = ""
+        with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history) as stream:
+            for text in stream.text_stream:
+                reply += text
     except Exception as e:
         await thinking.edit_text(f"❌ Ошибка API: {e}")
         return ST_CHATTING
@@ -204,6 +208,41 @@ async def cb_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_session_history(query.from_user.id)
         await safe_edit(query, "✏️ Напиши новое ТЗ:")
         return ST_WAIT_TZ
+
+    if action == "save_example":
+        uid     = query.from_user.id
+        session = get_session(uid)
+        history = session.get("history", [])
+        pid     = session.get("project_id")
+        fid     = session.get("format_id")
+
+        if not history or not pid or not fid:
+            await query.answer("Нет текста для сохранения", show_alert=True)
+            return ST_CHATTING
+
+        last_text = None
+        for msg in reversed(history):
+            if msg["role"] == "assistant":
+                last_text = msg["content"]
+                break
+
+        if not last_text:
+            await query.answer("Нет текста для сохранения", show_alert=True)
+            return ST_CHATTING
+
+        proj  = get_project(pid)
+        fmt   = get_format(fid)
+        uname = query.from_user.username or str(uid)
+        fname = f"approved_{uname}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        add_example(pid, fid, fname, last_text)
+
+        await query.answer("✅ Сохранено как пример!", show_alert=False)
+        await query.message.reply_text(
+            f"✅ Текст сохранён как пример для проекта «{proj['name']}», формат «{fmt['name']}».\n\n"
+            "Теперь Claude будет учитывать его при следующих генерациях в этом формате.",
+            reply_markup=kb_after_text()
+        )
+        return ST_CHATTING
 
     if action == "skip":
         context.user_data["skipped"] = True

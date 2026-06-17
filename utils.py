@@ -99,6 +99,7 @@ def kb_formats(project_id):
 
 def kb_after_text():
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Сохранить как пример", callback_data="action:save_example")],
         [InlineKeyboardButton("🔄 Новое ТЗ", callback_data="action:new_tz"),
          InlineKeyboardButton("📁 Сменить проект", callback_data="menu:write")],
         [InlineKeyboardButton("🏠 Главное меню", callback_data="menu:main")],

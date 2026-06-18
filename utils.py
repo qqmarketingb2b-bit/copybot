@@ -120,8 +120,13 @@ def kb_main_menu(is_admin):
         buttons.append([InlineKeyboardButton("⚙️ Панель администратора", callback_data="menu:admin")])
     return InlineKeyboardMarkup(buttons)
 
-def kb_projects():
-    projects = list_projects()
+def kb_projects(telegram_id=None, role=None):
+    if telegram_id is not None and role is not None:
+        from database import list_accessible_projects
+        from config import ADMIN_ROLES
+        projects = list_accessible_projects(telegram_id, role, ADMIN_ROLES)
+    else:
+        projects = list_projects()
     buttons = [[InlineKeyboardButton(p["name"], callback_data=f"project:{p['id']}")] for p in projects]
     buttons.append([InlineKeyboardButton("🏠 Главное меню", callback_data="menu:main")])
     return InlineKeyboardMarkup(buttons)
@@ -129,7 +134,7 @@ def kb_projects():
 def kb_formats(project_id):
     formats = get_project_formats(project_id)
     buttons = [[InlineKeyboardButton(f"{f['emoji']} {f['name']}", callback_data=f"format:{f['id']}")] for f in formats]
-    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="menu:write")])
+    buttons.append([InlineKeyboardButton("◀️ Назад к проектам", callback_data="menu:write")])
     return InlineKeyboardMarkup(buttons)
 
 
@@ -226,14 +231,32 @@ def kb_users_menu():
     buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin:back")])
     return InlineKeyboardMarkup(buttons)
 
+def kb_back_to_format(project_id):
+    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад к выбору формата", callback_data=f"project:{project_id}")]])
+
 def kb_user_manage(telegram_id, current_role):
     buttons = []
     if current_role != ROLE_SUBADMIN:
         buttons.append([InlineKeyboardButton("⬆️ Сделать Суб-Админом", callback_data=f"user:setrole:{telegram_id}:{ROLE_SUBADMIN}")])
     if current_role != ROLE_EMPLOYEE:
         buttons.append([InlineKeyboardButton("⬇️ Сделать Сотрудником", callback_data=f"user:setrole:{telegram_id}:{ROLE_EMPLOYEE}")])
+    if current_role == ROLE_EMPLOYEE:
+        buttons.append([InlineKeyboardButton("📁 Доступ к проектам", callback_data=f"user:projects:{telegram_id}")])
     buttons.append([InlineKeyboardButton("🗑 Удалить из бота", callback_data=f"user:remove:{telegram_id}")])
     buttons.append([InlineKeyboardButton("◀️ Назад", callback_data="admin:users")])
+    return InlineKeyboardMarkup(buttons)
+
+def kb_user_projects(telegram_id):
+    from database import get_user_project_ids
+    projects   = list_projects()
+    allowed    = get_user_project_ids(telegram_id)
+    buttons = []
+    for p in projects:
+        check = "✅" if p["id"] in allowed else "☐"
+        buttons.append([InlineKeyboardButton(f"{check} {p['name']}", callback_data=f"user:toggleproj:{telegram_id}:{p['id']}")])
+    if not projects:
+        buttons.append([InlineKeyboardButton("Нет проектов", callback_data="noop")])
+    buttons.append([InlineKeyboardButton("◀️ Назад", callback_data=f"user:manage:{telegram_id}")])
     return InlineKeyboardMarkup(buttons)
 
 def kb_projects_menu():

@@ -22,11 +22,29 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None):
         await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
 async def stream_claude(system, messages):
-    reply = ""
-    with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages) as stream:
-        for text in stream.text_stream:
-            reply += text
-    return reply
+    import asyncio
+    loop = asyncio.get_event_loop()
+
+    def _run():
+        reply = ""
+        with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages) as stream:
+            for text in stream.text_stream:
+                reply += text
+        return reply
+
+    return await asyncio.wait_for(loop.run_in_executor(None, _run), timeout=180)
+
+async def send_long_text(message, text, reply_markup=None):
+    """Splits text into Telegram-safe chunks (max 4096 chars) and sends them in order,
+    attaching reply_markup only to the final chunk. Plain text, no Markdown parsing,
+    to avoid silent failures on unbalanced formatting characters in generated content."""
+    chunks = [text[i:i+4000] for i in range(0, len(text), 4000)] or [text]
+    for i, chunk in enumerate(chunks):
+        is_last = (i == len(chunks) - 1)
+        try:
+            await message.reply_text(chunk, reply_markup=reply_markup if is_last else None)
+        except Exception as e:
+            await message.reply_text(f"❌ Не удалось отправить часть текста: {e}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────
@@ -286,7 +304,7 @@ async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     update_task(task_id, history=history, status="active")
     await thinking.delete()
-    await update.message.reply_text(reply, reply_markup=kb_after_text(task_id))
+    await send_long_text(update.message, reply, reply_markup=kb_after_text(task_id))
     return ST_CHATTING
 
 
@@ -313,7 +331,7 @@ async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "assistant", "content": reply})
     update_task(task_id, history=history)
     await thinking.delete()
-    await update.message.reply_text(reply, reply_markup=kb_after_text(task_id))
+    await send_long_text(update.message, reply, reply_markup=kb_after_text(task_id))
     return ST_CHATTING
 
 
@@ -380,11 +398,8 @@ async def do_translation(update, context, task_id, lang_code, with_seo):
         await query.message.reply_text(f"❌ Ошибка API: {e}")
         return ST_CHATTING
 
-    await query.message.reply_text(
-        f"{flag} *{lang_name}*\n\n{translated}",
-        parse_mode="Markdown",
-        reply_markup=kb_after_translation(task_id)
-    )
+    full_text = f"{flag} {lang_name}\n\n{translated}"
+    await send_long_text(query.message, full_text, reply_markup=kb_after_translation(task_id))
     return ST_CHATTING
 
 

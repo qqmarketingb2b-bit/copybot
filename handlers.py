@@ -97,11 +97,12 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ST_MAIN_MENU
 
     if action == "write":
-        projects = list_projects()
+        projects = list_accessible_projects(uid, user["role"], ADMIN_ROLES)
         if not projects:
-            await safe_edit(query, "⚠️ Пока нет ни одного проекта.", reply_markup=kb_main_menu(is_admin_role(user["role"])))
+            msg = "⚠️ Пока нет ни одного проекта." if is_admin_role(user["role"]) else "⚠️ У тебя пока нет доступа ни к одному проекту. Обратись к администратору."
+            await safe_edit(query, msg, reply_markup=kb_main_menu(is_admin_role(user["role"])))
             return ST_MAIN_MENU
-        await safe_edit(query, "📁 Выбери проект для новой задачи:", reply_markup=kb_projects())
+        await safe_edit(query, "📁 Выбери проект для новой задачи:", reply_markup=kb_projects(uid, user["role"]))
         return ST_WAIT_PROJECT
 
     if action == "tasks":
@@ -206,12 +207,18 @@ async def cb_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cb_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query      = update.callback_query
     await query.answer()
+    uid        = query.from_user.id
+    user       = get_user(uid)
     project_id = int(query.data.split(":")[1])
     proj       = get_project(project_id)
-    formats    = get_project_formats(project_id)
 
+    if not is_admin_role(user["role"]) and not has_project_access(uid, project_id):
+        await query.answer("⛔ Нет доступа к этому проекту", show_alert=True)
+        return ST_WAIT_PROJECT
+
+    formats = get_project_formats(project_id)
     if not formats:
-        await safe_edit(query, f"⚠️ У проекта «{proj['name']}» нет форматов. Обратись к администратору.", reply_markup=kb_projects())
+        await safe_edit(query, f"⚠️ У проекта «{proj['name']}» нет форматов. Обратись к администратору.", reply_markup=kb_projects(uid, user["role"]))
         return ST_WAIT_PROJECT
 
     context.user_data["new_task_project_id"] = project_id
@@ -232,22 +239,34 @@ async def cb_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid       = query.from_user.id
     pid       = context.user_data.get("new_task_project_id")
 
-    task_id = create_task(uid, project_id=pid, format_id=format_id)
-    set_active_task(uid, task_id)
+    # Defer task creation until first TZ is actually submitted —
+    # store the pending project/format choice instead of creating a row now.
+    context.user_data["pending_format_id"] = format_id
 
     await safe_edit(
         query,
         f"✅ Формат: *{fmt['emoji']} {fmt['name']}*\n\n✏️ Напиши ТЗ — что нужно написать, о чём, ключевые тезисы:\n\n"
         "💡 Это новая задача — твои другие задачи остаются доступны в «Мои задачи».",
-        parse_mode="Markdown"
+        parse_mode="Markdown",
+        reply_markup=kb_back_to_format(pid)
     )
     return ST_WAIT_TZ
 
 
 async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid     = update.effective_user.id
-    task_id = get_active_task_id(uid)
-    task    = get_task(task_id) if task_id else None
+    uid = update.effective_user.id
+
+    pending_fid = context.user_data.pop("pending_format_id", None)
+    pending_pid = context.user_data.get("new_task_project_id")
+
+    if pending_fid:
+        # Brand-new task — create the row only now that we have real content.
+        task_id = create_task(uid, project_id=pending_pid, format_id=pending_fid)
+        set_active_task(uid, task_id)
+        task = get_task(task_id)
+    else:
+        task_id = get_active_task_id(uid)
+        task    = get_task(task_id) if task_id else None
 
     if not task or not task.get("project_id") or not task.get("format_id"):
         await update.message.reply_text("⚠️ Сначала выбери проект и формат.", reply_markup=kb_main_menu(False))
@@ -459,6 +478,24 @@ async def cb_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ST_ADMIN_MENU
         update_user_role(tid, new_role)
         await safe_edit(query, f"✅ Роль обновлена: {ROLE_LABELS[new_role]}", reply_markup=kb_users_menu())
+        return ST_ADMIN_MENU
+
+    if parts[1] == "projects":
+        tid = int(parts[2])
+        usr = get_user(tid)
+        uname = f"@{usr['username']}" if usr["username"] else str(tid)
+        await safe_edit(query, f"📁 Доступ к проектам для {uname}\n\nОтметь проекты, которые сотрудник может видеть:", reply_markup=kb_user_projects(tid))
+        return ST_ADMIN_MENU
+
+    if parts[1] == "toggleproj":
+        tid, pid = int(parts[2]), int(parts[3])
+        if has_project_access(tid, pid):
+            revoke_project_access(tid, pid)
+        else:
+            grant_project_access(tid, pid)
+        usr = get_user(tid)
+        uname = f"@{usr['username']}" if usr["username"] else str(tid)
+        await safe_edit(query, f"📁 Доступ к проектам для {uname}\n\nОтметь проекты, которые сотрудник может видеть:", reply_markup=kb_user_projects(tid))
         return ST_ADMIN_MENU
 
     if parts[1] == "remove":

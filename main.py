@@ -34,6 +34,7 @@ def build_app():
             ],
             ST_WAIT_TZ: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_tz),
+                CallbackQueryHandler(cb_project, pattern="^project:"),
                 CallbackQueryHandler(cb_menu, pattern="^menu:"),
             ],
             ST_CHATTING: [

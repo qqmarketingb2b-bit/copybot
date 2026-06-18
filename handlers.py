@@ -21,6 +21,13 @@ async def safe_edit(query, text, reply_markup=None, parse_mode=None):
     except Exception:
         await query.message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
+async def stream_claude(system, messages):
+    reply = ""
+    with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=messages) as stream:
+        for text in stream.text_stream:
+            reply += text
+    return reply
+
 
 # ── Entry point ───────────────────────────────────────────────────────
 
@@ -94,8 +101,12 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not projects:
             await safe_edit(query, "⚠️ Пока нет ни одного проекта.", reply_markup=kb_main_menu(is_admin_role(user["role"])))
             return ST_MAIN_MENU
-        await safe_edit(query, "📁 Выбери проект:", reply_markup=kb_projects())
+        await safe_edit(query, "📁 Выбери проект для новой задачи:", reply_markup=kb_projects())
         return ST_WAIT_PROJECT
+
+    if action == "tasks":
+        await safe_edit(query, "📋 Твои задачи:", reply_markup=kb_tasks_list(uid))
+        return ST_TASKS_MENU
 
     if action == "admin":
         if not is_admin_role(user["role"]):
@@ -107,7 +118,90 @@ async def cb_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ST_MAIN_MENU
 
 
-# ── Writing flow ──────────────────────────────────────────────────────
+# ── Tasks list / open ────────────────────────────────────────────────
+
+async def cb_task(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    uid   = query.from_user.id
+
+    if parts[1] == "open":
+        task_id = int(parts[2])
+        task    = get_task(task_id)
+        if not task or task["telegram_id"] != uid:
+            await query.answer("Задача не найдена", show_alert=True)
+            return ST_TASKS_MENU
+        proj = get_project(task["project_id"]) if task["project_id"] else None
+        fmt  = get_format(task["format_id"]) if task["format_id"] else None
+        last_text = ""
+        for msg in reversed(task["history"]):
+            if msg["role"] == "assistant":
+                last_text = msg["content"][:500]
+                break
+        status_label = STATUS_LABELS.get(task["status"], task["status"])
+        preview = f"\n\n📝 Последний текст:\n{last_text}{'…' if last_text and len(last_text) >= 500 else ''}" if last_text else "\n\nЕщё нет сгенерированного текста — продолжи диалог, чтобы написать ТЗ."
+        await safe_edit(
+            query,
+            f"{status_label}\nПроект: *{proj['name'] if proj else '—'}*\nФормат: {fmt['emoji'] if fmt else ''} {fmt['name'] if fmt else '—'}{preview}",
+            parse_mode="Markdown",
+            reply_markup=kb_task_open(task)
+        )
+        return ST_TASKS_MENU
+
+    if parts[1] == "continue":
+        task_id = int(parts[2])
+        task    = get_task(task_id)
+        if not task or task["telegram_id"] != uid:
+            await query.answer("Задача не найдена", show_alert=True)
+            return ST_TASKS_MENU
+        set_active_task(uid, task_id)
+        if not task["history"]:
+            await safe_edit(query, "✏️ Напиши ТЗ — что нужно написать, о чём, ключевые тезисы:")
+            return ST_WAIT_TZ
+        await safe_edit(query, "💬 Продолжай — напиши правку или уточнение к этой задаче:")
+        return ST_CHATTING
+
+    if parts[1] == "saveex":
+        task_id = int(parts[2])
+        task    = get_task(task_id)
+        if not task or task["telegram_id"] != uid:
+            await query.answer("Задача не найдена", show_alert=True)
+            return ST_TASKS_MENU
+        last_text = None
+        for msg in reversed(task["history"]):
+            if msg["role"] == "assistant":
+                last_text = msg["content"]
+                break
+        if not last_text:
+            await query.answer("Нет текста для сохранения", show_alert=True)
+            return ST_TASKS_MENU
+        proj  = get_project(task["project_id"])
+        fmt   = get_format(task["format_id"])
+        uname = query.from_user.username or str(uid)
+        fname = f"approved_{uname}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+        add_example(task["project_id"], task["format_id"], fname, last_text)
+        update_task(task_id, status="approved")
+        await query.answer("✅ Сохранено как пример!")
+        await safe_edit(
+            query,
+            f"✅ Текст сохранён как пример для проекта «{proj['name']}», формат «{fmt['name']}».\nЗадача отмечена как одобренная.",
+            reply_markup=kb_tasks_list(uid)
+        )
+        return ST_TASKS_MENU
+
+    if parts[1] == "delete":
+        task_id = int(parts[2])
+        task    = get_task(task_id)
+        if task and task["telegram_id"] == uid:
+            delete_task(task_id)
+        await safe_edit(query, "🗑 Задача удалена.", reply_markup=kb_tasks_list(uid))
+        return ST_TASKS_MENU
+
+    return ST_TASKS_MENU
+
+
+# ── New task: project → format → TZ ──────────────────────────────────
 
 async def cb_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query      = update.callback_query
@@ -120,8 +214,7 @@ async def cb_project(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit(query, f"⚠️ У проекта «{proj['name']}» нет форматов. Обратись к администратору.", reply_markup=kb_projects())
         return ST_WAIT_PROJECT
 
-    save_session(query.from_user.id, project_id=project_id)
-    clear_session_history(query.from_user.id)
+    context.user_data["new_task_project_id"] = project_id
     await safe_edit(
         query,
         f"✅ Проект: *{proj['name']}*\n\nВыбери формат текста:",
@@ -136,11 +229,16 @@ async def cb_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     format_id = int(query.data.split(":")[1])
     fmt       = get_format(format_id)
-    save_session(query.from_user.id, format_id=format_id)
-    clear_session_history(query.from_user.id)
+    uid       = query.from_user.id
+    pid       = context.user_data.get("new_task_project_id")
+
+    task_id = create_task(uid, project_id=pid, format_id=format_id)
+    set_active_task(uid, task_id)
+
     await safe_edit(
         query,
-        f"✅ Формат: *{fmt['emoji']} {fmt['name']}*\n\n✏️ Напиши ТЗ — что нужно написать, о чём, ключевые тезисы:",
+        f"✅ Формат: *{fmt['emoji']} {fmt['name']}*\n\n✏️ Напиши ТЗ — что нужно написать, о чём, ключевые тезисы:\n\n"
+        "💡 Это новая задача — твои другие задачи остаются доступны в «Мои задачи».",
         parse_mode="Markdown"
     )
     return ST_WAIT_TZ
@@ -148,104 +246,136 @@ async def cb_format(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_tz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = update.effective_user.id
-    session = get_session(uid)
+    task_id = get_active_task_id(uid)
+    task    = get_task(task_id) if task_id else None
 
-    if not session.get("project_id") or not session.get("format_id"):
+    if not task or not task.get("project_id") or not task.get("format_id"):
         await update.message.reply_text("⚠️ Сначала выбери проект и формат.", reply_markup=kb_main_menu(False))
         return ST_MAIN_MENU
 
-    history = session["history"]
+    history = task["history"]
     history.append({"role": "user", "content": update.message.text})
-    system   = build_system_prompt(session["project_id"], session["format_id"])
+    system   = build_system_prompt(task["project_id"], task["format_id"])
     thinking = await update.message.reply_text("⏳ Пишу текст...")
 
     try:
-        reply = ""
-        with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history) as stream:
-            for text in stream.text_stream:
-                reply += text
+        reply = await stream_claude(system, history)
     except Exception as e:
         await thinking.edit_text(f"❌ Ошибка API: {e}")
         return ST_WAIT_TZ
 
     history.append({"role": "assistant", "content": reply})
-    save_session(uid, history=history)
+    update_task(task_id, history=history, status="active")
     await thinking.delete()
-    await update.message.reply_text(reply, reply_markup=kb_after_text())
+    await update.message.reply_text(reply, reply_markup=kb_after_text(task_id))
     return ST_CHATTING
 
 
 async def handle_edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid     = update.effective_user.id
-    session = get_session(uid)
-    history = session["history"]
+    task_id = get_active_task_id(uid)
+    task    = get_task(task_id) if task_id else None
+
+    if not task:
+        await update.message.reply_text("⚠️ Активная задача не найдена.", reply_markup=kb_main_menu(False))
+        return ST_MAIN_MENU
+
+    history = task["history"]
     history.append({"role": "user", "content": update.message.text})
-    system   = build_system_prompt(session["project_id"], session["format_id"])
+    system   = build_system_prompt(task["project_id"], task["format_id"])
     thinking = await update.message.reply_text("✏️ Вношу правки...")
 
     try:
-        reply = ""
-        with anthropic_client.messages.stream(model=CLAUDE_MODEL, max_tokens=MAX_TOKENS, system=system, messages=history) as stream:
-            for text in stream.text_stream:
-                reply += text
+        reply = await stream_claude(system, history)
     except Exception as e:
         await thinking.edit_text(f"❌ Ошибка API: {e}")
         return ST_CHATTING
 
     history.append({"role": "assistant", "content": reply})
-    save_session(uid, history=history)
+    update_task(task_id, history=history)
     await thinking.delete()
-    await update.message.reply_text(reply, reply_markup=kb_after_text())
+    await update.message.reply_text(reply, reply_markup=kb_after_text(task_id))
+    return ST_CHATTING
+
+
+# ── Translation & SEO ────────────────────────────────────────────────
+
+async def cb_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    parts = query.data.split(":")
+    uid   = query.from_user.id
+
+    if parts[1] == "menu":
+        task_id = int(parts[2])
+        await safe_edit(query, "🌍 Выбери язык перевода:", reply_markup=kb_translate_languages(task_id))
+        return ST_WAIT_TRANSLATE_LANG
+
+    if parts[1] == "lang":
+        task_id, lang_code = int(parts[2]), parts[3]
+        task = get_task(task_id)
+        fmt  = get_format(task["format_id"]) if task else None
+
+        if fmt and fmt.get("is_article"):
+            flag, lang_name, _ = LANGUAGES[lang_code]
+            await safe_edit(
+                query,
+                f"{flag} Перевод на {lang_name}.\n\nЭто статья — хочешь добавить SEO-оптимизацию под этот язык и рынок?",
+                reply_markup=kb_seo_choice(task_id, lang_code)
+            )
+            return ST_WAIT_SEO_CHOICE
+        else:
+            return await do_translation(update, context, task_id, lang_code, with_seo=False)
+
+    if parts[1] == "go":
+        task_id, lang_code, seo_flag = int(parts[2]), parts[3], parts[4]
+        return await do_translation(update, context, task_id, lang_code, with_seo=(seo_flag == "seo"))
+
+    return ST_CHATTING
+
+
+async def do_translation(update, context, task_id, lang_code, with_seo):
+    query = update.callback_query
+    task  = get_task(task_id)
+    if not task:
+        await query.answer("Задача не найдена", show_alert=True)
+        return ST_TASKS_MENU
+
+    last_text = None
+    for msg in reversed(task["history"]):
+        if msg["role"] == "assistant":
+            last_text = msg["content"]
+            break
+
+    if not last_text:
+        await query.answer("Нет текста для перевода", show_alert=True)
+        return ST_CHATTING
+
+    flag, lang_name, _ = LANGUAGES[lang_code]
+    await safe_edit(query, f"{flag} Перевожу на {lang_name}{' с SEO-оптимизацией' if with_seo else ''}...")
+
+    system = build_translate_prompt(lang_code, task["project_id"], with_seo=with_seo)
+    try:
+        translated = await stream_claude(system, [{"role": "user", "content": last_text}])
+    except Exception as e:
+        await query.message.reply_text(f"❌ Ошибка API: {e}")
+        return ST_CHATTING
+
+    await query.message.reply_text(
+        f"{flag} *{lang_name}*\n\n{translated}",
+        parse_mode="Markdown",
+        reply_markup=kb_after_translation(task_id)
+    )
     return ST_CHATTING
 
 
 async def cb_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles generic action callbacks, currently used for skipping TOV during project creation."""
     query  = update.callback_query
     await query.answer()
     action = query.data.split(":", 1)[1]
 
-    if action == "new_tz":
-        clear_session_history(query.from_user.id)
-        await safe_edit(query, "✏️ Напиши новое ТЗ:")
-        return ST_WAIT_TZ
-
-    if action == "save_example":
-        uid     = query.from_user.id
-        session = get_session(uid)
-        history = session.get("history", [])
-        pid     = session.get("project_id")
-        fid     = session.get("format_id")
-
-        if not history or not pid or not fid:
-            await query.answer("Нет текста для сохранения", show_alert=True)
-            return ST_CHATTING
-
-        last_text = None
-        for msg in reversed(history):
-            if msg["role"] == "assistant":
-                last_text = msg["content"]
-                break
-
-        if not last_text:
-            await query.answer("Нет текста для сохранения", show_alert=True)
-            return ST_CHATTING
-
-        proj  = get_project(pid)
-        fmt   = get_format(fid)
-        uname = query.from_user.username or str(uid)
-        fname = f"approved_{uname}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
-        add_example(pid, fid, fname, last_text)
-
-        await query.answer("✅ Сохранено как пример!", show_alert=False)
-        await query.message.reply_text(
-            f"✅ Текст сохранён как пример для проекта «{proj['name']}», формат «{fmt['name']}».\n\n"
-            "Теперь Claude будет учитывать его при следующих генерациях в этом формате.",
-            reply_markup=kb_after_text()
-        )
-        return ST_CHATTING
-
     if action == "skip":
-        context.user_data["skipped"] = True
         flow = context.user_data.get("admin_flow")
         if flow == "add_project":
             name    = context.user_data.get("new_project_name")
@@ -259,7 +389,7 @@ async def cb_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ST_EDIT_PROJECT_FORMAT_MENU
         return ST_ADMIN_MENU
 
-    return ST_CHATTING
+    return ST_ADMIN_MENU
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -437,7 +567,7 @@ async def cb_proj(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ST_EDIT_PROJECT_FORMAT_MENU
 
     if parts[1] == "exmenu":
-        pid = int(parts[2])
+        pid  = int(parts[2])
         fmts = get_project_formats(pid)
         if not fmts:
             await query.answer("Сначала подключи хотя бы один формат", show_alert=True)
@@ -564,7 +694,8 @@ async def cb_fmt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if parts[1] == "manage":
         fid = int(parts[2])
         fmt = get_format(fid)
-        await safe_edit(query, f"{fmt['emoji']} *{fmt['name']}*\n\n{fmt['instruction']}", parse_mode="Markdown", reply_markup=kb_format_manage(fid))
+        article_label = "Да (с поддержкой SEO)" if fmt.get("is_article") else "Нет"
+        await safe_edit(query, f"{fmt['emoji']} *{fmt['name']}*\n\n{fmt['instruction']}\n\nЭто формат статьи: {article_label}", parse_mode="Markdown", reply_markup=kb_format_manage(fid))
         return ST_ADMIN_MENU
 
     if parts[1] == "delete":
@@ -588,12 +719,25 @@ async def handle_add_format_emoji(update: Update, context: ContextTypes.DEFAULT_
     return ST_ADD_FORMAT_INSTRUCTION
 
 async def handle_add_format_instruction(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["new_format_instruction"] = update.message.text.strip()
+    await update.message.reply_text(
+        "Это формат статьи? Если да — при переводе будет предложена SEO-оптимизация под целевой язык.",
+        reply_markup=kb_article_yesno()
+    )
+    return ST_ADD_FORMAT_INSTRUCTION
+
+
+async def cb_newformat_article(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    is_article = 1 if query.data.endswith("yes") else 0
+
     name        = context.user_data.get("new_format_name", "Новый формат")
     emoji       = context.user_data.get("new_format_emoji", "📝")
-    instruction = update.message.text.strip()
-    create_format(name, emoji, instruction)
+    instruction = context.user_data.get("new_format_instruction", "")
+    create_format(name, emoji, instruction, is_article=is_article)
     context.user_data["admin_flow"] = None
-    await update.message.reply_text(f"✅ Формат «{emoji} {name}» добавлен!", reply_markup=kb_formats_menu())
+    await safe_edit(query, f"✅ Формат «{emoji} {name}» добавлен!", reply_markup=kb_formats_menu())
     return ST_ADMIN_MENU
 
 

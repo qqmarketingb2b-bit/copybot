@@ -74,6 +74,13 @@ def init_db():
             active_task_id  INTEGER
         );
 
+        CREATE TABLE IF NOT EXISTS user_projects (
+            telegram_id   INTEGER NOT NULL,
+            project_id    INTEGER NOT NULL,
+            PRIMARY KEY (telegram_id, project_id),
+            FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+        );
+
         CREATE TABLE IF NOT EXISTS settings (
             key           TEXT PRIMARY KEY,
             value         TEXT
@@ -175,6 +182,7 @@ def update_project(project_id, name=None, tov_text=None, tov_filename=None):
 def delete_project(project_id):
     conn = get_conn()
     conn.execute("DELETE FROM projects WHERE id=?", (project_id,))
+    conn.execute("DELETE FROM user_projects WHERE project_id=?", (project_id,))
     conn.commit()
     conn.close()
 
@@ -214,6 +222,42 @@ def is_format_linked(project_id, format_id):
     row = conn.execute("SELECT 1 FROM project_formats WHERE project_id=? AND format_id=?", (project_id, format_id)).fetchone()
     conn.close()
     return row is not None
+
+
+# ── User ↔ Project access (for employees) ──────────────────────────────
+
+def grant_project_access(telegram_id, project_id):
+    conn = get_conn()
+    conn.execute("INSERT OR IGNORE INTO user_projects (telegram_id, project_id) VALUES (?,?)", (telegram_id, project_id))
+    conn.commit()
+    conn.close()
+
+def revoke_project_access(telegram_id, project_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM user_projects WHERE telegram_id=? AND project_id=?", (telegram_id, project_id))
+    conn.commit()
+    conn.close()
+
+def has_project_access(telegram_id, project_id):
+    conn = get_conn()
+    row = conn.execute("SELECT 1 FROM user_projects WHERE telegram_id=? AND project_id=?", (telegram_id, project_id)).fetchone()
+    conn.close()
+    return row is not None
+
+def get_user_project_ids(telegram_id):
+    conn = get_conn()
+    rows = conn.execute("SELECT project_id FROM user_projects WHERE telegram_id=?", (telegram_id,)).fetchall()
+    conn.close()
+    return {r[0] for r in rows}
+
+def list_accessible_projects(telegram_id, role, admin_roles):
+    """Admins/Sub-admins see all projects. Employees see only explicitly granted ones."""
+    if role in admin_roles:
+        return list_projects()
+    allowed_ids = get_user_project_ids(telegram_id)
+    if not allowed_ids:
+        return []
+    return [p for p in list_projects() if p["id"] in allowed_ids]
 
 
 # ── Examples (project + format) ────────────────────────────────────────

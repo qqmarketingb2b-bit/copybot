@@ -4,7 +4,7 @@ TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ANTHROPIC_KEY    = os.environ.get("ANTHROPIC_API_KEY", "")
 ADMIN_CODE       = os.environ.get("ADMIN_CODE", "ADMIN_SECRET_2024")
 
-CLAUDE_MODEL     = "claude-opus-4-20250514"
+CLAUDE_MODEL     = "claude-sonnet-4-6"
 MAX_TOKENS       = 15000
 MAX_FILE_SIZE_MB = 10
 MAX_ACTIVE_TASKS = 0   # 0 = без ограничений

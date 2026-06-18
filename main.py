@@ -38,18 +38,34 @@ def build_app():
             ],
             ST_CHATTING: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_edit),
-                CallbackQueryHandler(cb_action,  pattern="^action:"),
-                CallbackQueryHandler(cb_menu,    pattern="^menu:"),
-                CallbackQueryHandler(cb_project, pattern="^project:"),
-                CallbackQueryHandler(cb_format,  pattern="^format:"),
+                CallbackQueryHandler(cb_task,      pattern="^task:"),
+                CallbackQueryHandler(cb_translate, pattern="^translate:"),
+                CallbackQueryHandler(cb_menu,      pattern="^menu:"),
+                CallbackQueryHandler(cb_project,   pattern="^project:"),
+                CallbackQueryHandler(cb_format,    pattern="^format:"),
             ],
+            ST_TASKS_MENU: [
+                CallbackQueryHandler(cb_task,      pattern="^task:"),
+                CallbackQueryHandler(cb_translate, pattern="^translate:"),
+                CallbackQueryHandler(cb_menu,      pattern="^menu:"),
+            ],
+            ST_WAIT_TRANSLATE_LANG: [
+                CallbackQueryHandler(cb_translate, pattern="^translate:"),
+                CallbackQueryHandler(cb_task,      pattern="^task:"),
+                CallbackQueryHandler(cb_menu,      pattern="^menu:"),
+            ],
+            ST_WAIT_SEO_CHOICE: [
+                CallbackQueryHandler(cb_translate, pattern="^translate:"),
+                CallbackQueryHandler(cb_task,      pattern="^task:"),
+            ],
+
             ST_ADMIN_MENU: [
-                CallbackQueryHandler(cb_admin,       pattern="^admin:"),
-                CallbackQueryHandler(cb_user,        pattern="^user:"),
-                CallbackQueryHandler(cb_proj,        pattern="^proj:"),
-                CallbackQueryHandler(cb_fmt,         pattern="^fmt:"),
-                CallbackQueryHandler(cb_menu,        pattern="^menu:"),
-                CallbackQueryHandler(cb_newuser_role,pattern="^newuser:"),
+                CallbackQueryHandler(cb_admin,         pattern="^admin:"),
+                CallbackQueryHandler(cb_user,          pattern="^user:"),
+                CallbackQueryHandler(cb_proj,          pattern="^proj:"),
+                CallbackQueryHandler(cb_fmt,           pattern="^fmt:"),
+                CallbackQueryHandler(cb_menu,          pattern="^menu:"),
+                CallbackQueryHandler(cb_newuser_role,  pattern="^newuser:"),
             ],
             ST_ADD_USER_WAIT_USERNAME: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_user_username),
@@ -107,6 +123,7 @@ def build_app():
             ],
             ST_ADD_FORMAT_INSTRUCTION: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_add_format_instruction),
+                CallbackQueryHandler(cb_newformat_article, pattern="^newformat:"),
                 CallbackQueryHandler(cb_admin, pattern="^admin:"),
             ],
         },

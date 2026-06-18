@@ -34,6 +34,7 @@ def init_db():
             name          TEXT NOT NULL,
             emoji         TEXT DEFAULT '📝',
             instruction   TEXT NOT NULL,
+            is_article    INTEGER DEFAULT 0,
             active        INTEGER DEFAULT 1
         );
 
@@ -56,12 +57,21 @@ def init_db():
             FOREIGN KEY (format_id)  REFERENCES formats(id)  ON DELETE CASCADE
         );
 
-        CREATE TABLE IF NOT EXISTS sessions (
-            telegram_id   INTEGER PRIMARY KEY,
+        CREATE TABLE IF NOT EXISTS tasks (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id   INTEGER NOT NULL,
             project_id    INTEGER,
             format_id     INTEGER,
+            title         TEXT DEFAULT '',
+            status        TEXT DEFAULT 'active',
             history       TEXT DEFAULT '[]',
+            created_at    TEXT,
             updated_at    TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS user_state (
+            telegram_id     INTEGER PRIMARY KEY,
+            active_task_id  INTEGER
         );
 
         CREATE TABLE IF NOT EXISTS settings (
@@ -70,14 +80,18 @@ def init_db():
         );
     """)
 
+    cols = [r[1] for r in c.execute("PRAGMA table_info(formats)").fetchall()]
+    if "is_article" not in cols:
+        c.execute("ALTER TABLE formats ADD COLUMN is_article INTEGER DEFAULT 0")
+
     if c.execute("SELECT COUNT(*) FROM formats").fetchone()[0] == 0:
         default_formats = [
-            ("Пост в Telegram", "📢", "Пишешь пост для Telegram. Длина — до 1500 символов. Абзацы, можно эмодзи. Никаких заголовков с #. Живой язык."),
-            ("Пост в Instagram", "📸", "Пишешь пост для Instagram. До 2200 символов. Живой язык, эмодзи уместны. Хэштеги (5–10 штук) в самом конце через пустую строку."),
-            ("Статья", "📄", "Пишешь статью. Структура: заголовок H1, подзаголовки H2, развёрнутые абзацы. Пиши столько, сколько указано в ТЗ."),
-            ("Email-рассылка", "📧", "Пишешь письмо для email-рассылки. Тема письма в первой строке после слова ТЕМА:. Длина — 150–300 слов. Чёткий призыв к действию в конце."),
+            ("Пост в Telegram", "📢", "Пишешь пост для Telegram. Длина — до 1500 символов. Абзацы, можно эмодзи. Никаких заголовков с #. Живой язык.", 0),
+            ("Пост в Instagram", "📸", "Пишешь пост для Instagram. До 2200 символов. Живой язык, эмодзи уместны. Хэштеги (5–10 штук) в самом конце через пустую строку.", 0),
+            ("Статья", "📄", "Пишешь статью. Структура: заголовок H1, подзаголовки H2, развёрнутые абзацы. Пиши столько, сколько указано в ТЗ.", 1),
+            ("Email-рассылка", "📧", "Пишешь письмо для email-рассылки. Тема письма в первой строке после слова ТЕМА:. Длина — 150–300 слов. Чёткий призыв к действию в конце.", 0),
         ]
-        c.executemany("INSERT INTO formats (name, emoji, instruction) VALUES (?,?,?)", default_formats)
+        c.executemany("INSERT INTO formats (name, emoji, instruction, is_article) VALUES (?,?,?,?)", default_formats)
 
     conn.commit()
     conn.close()
@@ -244,9 +258,9 @@ def get_format(format_id):
     conn.close()
     return dict(row) if row else None
 
-def create_format(name, emoji, instruction):
+def create_format(name, emoji, instruction, is_article=0):
     conn = get_conn()
-    conn.execute("INSERT INTO formats (name, emoji, instruction) VALUES (?,?,?)", (name, emoji, instruction))
+    conn.execute("INSERT INTO formats (name, emoji, instruction, is_article) VALUES (?,?,?,?)", (name, emoji, instruction, is_article))
     conn.commit()
     conn.close()
 
@@ -257,39 +271,80 @@ def delete_format(format_id):
     conn.close()
 
 
-# ── Sessions ───────────────────────────────────────────────────────────
+# ── Tasks (multiple parallel tasks per user) ────────────────────────────
 
-def get_session(telegram_id):
+def create_task(telegram_id, project_id=None, format_id=None, title=""):
     conn = get_conn()
-    row = conn.execute("SELECT * FROM sessions WHERE telegram_id=?", (telegram_id,)).fetchone()
+    now = datetime.now().isoformat()
+    conn.execute(
+        "INSERT INTO tasks (telegram_id, project_id, format_id, title, status, history, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (telegram_id, project_id, format_id, title, "active", "[]", now, now)
+    )
+    conn.commit()
+    task_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.close()
+    return task_id
+
+def get_task(task_id):
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
     conn.close()
     if not row:
-        return {"telegram_id": telegram_id, "project_id": None, "format_id": None, "history": []}
+        return None
     d = dict(row)
     d["history"] = json.loads(d["history"])
     return d
 
-def save_session(telegram_id, project_id=None, format_id=None, history=None):
+def update_task(task_id, project_id=None, format_id=None, title=None, status=None, history=None):
     conn = get_conn()
-    existing = conn.execute("SELECT telegram_id FROM sessions WHERE telegram_id=?", (telegram_id,)).fetchone()
-    if existing:
-        fields, vals = [], []
-        if project_id is not None: fields.append("project_id=?"); vals.append(project_id)
-        if format_id  is not None: fields.append("format_id=?");  vals.append(format_id)
-        if history    is not None: fields.append("history=?");    vals.append(json.dumps(history, ensure_ascii=False))
-        fields.append("updated_at=?"); vals.append(datetime.now().isoformat())
-        vals.append(telegram_id)
-        conn.execute(f"UPDATE sessions SET {', '.join(fields)} WHERE telegram_id=?", vals)
-    else:
-        conn.execute(
-            "INSERT INTO sessions (telegram_id, project_id, format_id, history, updated_at) VALUES (?,?,?,?,?)",
-            (telegram_id, project_id, format_id, json.dumps(history or [], ensure_ascii=False), datetime.now().isoformat())
-        )
+    fields, vals = [], []
+    if project_id is not None: fields.append("project_id=?"); vals.append(project_id)
+    if format_id  is not None: fields.append("format_id=?");  vals.append(format_id)
+    if title      is not None: fields.append("title=?");      vals.append(title)
+    if status     is not None: fields.append("status=?");     vals.append(status)
+    if history    is not None: fields.append("history=?");    vals.append(json.dumps(history, ensure_ascii=False))
+    fields.append("updated_at=?"); vals.append(datetime.now().isoformat())
+    vals.append(task_id)
+    conn.execute(f"UPDATE tasks SET {', '.join(fields)} WHERE id=?", vals)
     conn.commit()
     conn.close()
 
-def clear_session_history(telegram_id):
-    save_session(telegram_id, history=[])
+def delete_task(task_id):
+    conn = get_conn()
+    conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    conn.commit()
+    conn.close()
+
+def list_user_tasks(telegram_id, status=None):
+    conn = get_conn()
+    if status:
+        rows = conn.execute("SELECT * FROM tasks WHERE telegram_id=? AND status=? ORDER BY updated_at DESC", (telegram_id, status)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM tasks WHERE telegram_id=? ORDER BY updated_at DESC", (telegram_id,)).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+# ── User active task pointer ─────────────────────────────────────────────
+
+def set_active_task(telegram_id, task_id):
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO user_state (telegram_id, active_task_id) VALUES (?,?)", (telegram_id, task_id))
+    conn.commit()
+    conn.close()
+
+def get_active_task_id(telegram_id):
+    conn = get_conn()
+    row = conn.execute("SELECT active_task_id FROM user_state WHERE telegram_id=?", (telegram_id,)).fetchone()
+    conn.close()
+    return row[0] if row else None
+
+def clear_active_task(telegram_id):
+    conn = get_conn()
+    conn.execute("INSERT OR REPLACE INTO user_state (telegram_id, active_task_id) VALUES (?, NULL)", (telegram_id,))
+    conn.commit()
+    conn.close()
 
 
 # ── Settings ───────────────────────────────────────────────────────────

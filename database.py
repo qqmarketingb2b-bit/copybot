@@ -2,7 +2,10 @@ import sqlite3
 import json
 from datetime import datetime
 
-DB_PATH = "bot.db"
+import os
+DB_DIR  = os.environ.get("DB_DIR", "/app/data")
+os.makedirs(DB_DIR, exist_ok=True)
+DB_PATH = os.path.join(DB_DIR, "bot.db")
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
